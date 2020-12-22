@@ -1,4 +1,4 @@
-# advent-of-code-2020
+# Advent of Code 2020
 
 This repository contains my solutions for the 2020 Advent of Code event in Python.
 I completed these puzzles while the event was active in 2020.
