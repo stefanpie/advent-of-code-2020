@@ -10,7 +10,6 @@ import time
 
 
 if __name__ == "__main__":
-
     with open("input.txt") as f:
         data_lines = [line.rstrip() for line in f]
 
