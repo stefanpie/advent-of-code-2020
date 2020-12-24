@@ -1,212 +1,259 @@
+from typing import Dict, List, Set, Tuple
 import numpy as np
 import re
-import itertools
+import functools 
+from pprint import pprint
 import copy
 import matplotlib.pyplot as plt
+from typing import Set
+from scipy.signal import correlate2d
 
-
-def get_neigbors_indexes(p):
+def get_neigbors_indexes(p: Tuple[int,int]) -> List[Tuple[int,int]]:
     neighbours_indexes = [(p[0]+1,p[1]),(p[0]-1,p[1]),(p[0],p[1]+1),(p[0],p[1]-1)]
     return neighbours_indexes
 
+def get_check_edges(p_test_spot: Tuple[int,int], p_placed_neighbor_spot: Tuple[int,int]) -> Tuple[str,str]:
+    edge_test_spot = ''
+    edge_placed_neighbor_spot = ''
+    if p_test_spot == (p_placed_neighbor_spot[0]+1, p_placed_neighbor_spot[1]):
+        edge_test_spot = 'left'
+        edge_placed_neighbor_spot = 'right'
+    elif p_test_spot == (p_placed_neighbor_spot[0]-1, p_placed_neighbor_spot[1]):
+        edge_test_spot = 'right'
+        edge_placed_neighbor_spot = 'left'
+    elif p_test_spot == (p_placed_neighbor_spot[0], p_placed_neighbor_spot[1]+1):
+        edge_test_spot = 'bottom'
+        edge_placed_neighbor_spot = 'top'
+    elif p_test_spot == (p_placed_neighbor_spot[0], p_placed_neighbor_spot[1]-1):
+        edge_test_spot = 'top'
+        edge_placed_neighbor_spot = 'bottom'
+    return (edge_test_spot, edge_placed_neighbor_spot)
 
 class Tile:
-    def __init__(self, tile_id, tile_array):
-        self.tile_id = tile_id
-        self.tile_array = tile_array
-        
+    def __init__(self, id: int, array: List[List[int]]) -> None:
+        self.id = id
+        self.array = array
+        self.transposed: int = 0
+        self.rotated: int = 0
+    
+    def transpose(self) -> 'Tile':
+        new_tile = copy.deepcopy(self)
+        new_tile.array = [list(i) for i in zip(*new_tile.array)]
+        new_tile.transposed += 1
+        return new_tile
+
+    def rot_90(self) -> 'Tile':
+        new_tile = copy.deepcopy(self)
+        new_tile.array = [[new_tile.array[j][i] for j in range(len(new_tile.array))] for i in range(len(new_tile.array[0])-1,-1,-1)]
+        new_tile.rotated += 1
+        return new_tile
+
     @property
-    def all_tile_array_orientations(self):
-        possible_tile_arrays = []
-        for i in range(4):
-            new_tile = np.rot90(self.tile_array, k=i)
-            possible_tile_arrays.append(
-                {'flipped': 0,
-                 'rotation': 90*i,
-                 'array': new_tile,
-                 'id': self.tile_id,
-                 'edges':{
-                     'top': new_tile[0,:],
-                     'bottom': new_tile[-1,:],
-                     'left': new_tile[:,0],
-                     'right': new_tile[:,-1]
-                 }}
-            )
-        for i in range(4):
-            new_tile = np.rot90(np.fliplr(self.tile_array), k=i)
-            possible_tile_arrays.append(
-                {'flipped': 0,
-                 'rotation': 90*i,
-                 'array': new_tile,
-                 'id': self.tile_id,
-                 'edges':{
-                     'top': new_tile[0,:],
-                     'bottom': new_tile[-1,:],
-                     'left': new_tile[:,0],
-                     'right': new_tile[:,-1]
-                 }}
-            )
-        return possible_tile_arrays
+    def variants(self) -> List['Tile']:
+        variants_array = []
+        variants_array.append(self)
+        variants_array.append(self.rot_90())
+        variants_array.append(self.rot_90().rot_90())
+        variants_array.append(self.rot_90().rot_90().rot_90())
+        variants_array.append(self.transpose())
+        variants_array.append(self.transpose().rot_90())
+        variants_array.append(self.transpose().rot_90().rot_90())
+        variants_array.append(self.transpose().rot_90().rot_90().rot_90())
+        return variants_array
+    
+    @property
+    def edges(self) -> Dict[str, List[int]]:
+        edge_map = {}
+        edge_map['top'] = self.array[0][:]
+        edge_map['bottom'] = self.array[-1][:]
+        edge_map['left'] = [row[0] for row in self.array]
+        edge_map['right'] = [row[-1] for row in self.array]
+        return edge_map
+    
+    @property
+    def array_borderless(self) -> List[List[int]]:
+        new_array = copy.deepcopy(self.array)
+        new_array = new_array[1:-1]
+        new_array = [row[1:-1] for row in new_array]
+        return new_array
 
-    def __repr__(self):
-        string = ''
-        string += '<\n'
-        string += f"Tile ID: {self.tile_id}\n"
-        string += f"{str(self.tile_array)}\n"
-        string += '>\n'
-        return string
-
+    def __repr__(self) -> str:
+        return f"Tile {self.id}: t={self.transposed}, r={self.rotated}"
 
 class Image:
-    def __init__(self):
-        self.tiles = []
-        self.image = {}
-    
-    def solve_image_from_tiles(self):
-        tiles_not_placed = copy.copy(self.tiles)
-        tiles_placed = []
+    def __init__(self, tiles) -> None:
+        self.tiles: List[Tile] = tiles
+        self.unplaced_tile_ids: Set[int] = set()
+        self.placed_tile_ids: Set[int] = set()
+        self.image_map: Dict[Tuple[int,int], Tile] = {}
+        self.image_array: List[List[int]] = None
 
-        initial_tile = tiles_not_placed.pop(0).all_tile_array_orientations[0]
-        self.image[(0,0)] = initial_tile
-        tiles_placed.append(initial_tile)
+        for t in self.tiles:
+            self.unplaced_tile_ids.add(t.id)
 
+    @property
+    def image_map_corner_ids(self) -> List[str]:
+        cordinate_data = {}
+        cordinate_data['min_x'] = min([c[0] for c in self.image_map])
+        cordinate_data['max_x'] = max([c[0] for c in self.image_map])
+        cordinate_data['min_y'] = min([c[1] for c in self.image_map])
+        cordinate_data['max_y'] = max([c[1] for c in self.image_map])
+        cordinate_data['top_left'] = (cordinate_data['min_x'], cordinate_data['max_y'])
+        cordinate_data['top_right'] = (cordinate_data['max_x'], cordinate_data['max_y'])
+        cordinate_data['bottom_left'] = (cordinate_data['min_x'], cordinate_data['min_y'])
+        cordinate_data['bottom_right'] = (cordinate_data['max_x'], cordinate_data['min_y'])
 
-        while(len(tiles_not_placed)>0):
-            # print([(k, v['id']) for k,v in  self.image.items()])
-            print(tiles_placed.__len__())
-            print(tiles_not_placed.__len__())
-            plot_image(self.image)
-            for target_pos, target_tile in copy.deepcopy(self.image).items():
-                # print(f"target_pos: {target_pos}")
-                # print(f"target_tile_id: {target_tile['id']}")
-                tile_neighbor_indexes = get_neigbors_indexes(target_pos)
-                empty_tile_neighbor_indexes = list(filter(lambda i: i not in self.image, tile_neighbor_indexes))
-                # print(f"empty_tile_neighbor_indexes: {empty_tile_neighbor_indexes}")
-                for empty_tile_neighbor_index in empty_tile_neighbor_indexes:
-                    print(f"empty_tile_neighbor_index: {empty_tile_neighbor_index}")
-                    # segment_to_look_at_target = ''
-                    # segment_to_look_at_candidate = ''
-                    # if empty_tile_neighbor_index == (target_pos[0]+1, target_pos[1]):
-                    #     segment_to_look_at_target = 'right'
-                    #     segment_to_look_at_candidate = 'left'
-                    # elif empty_tile_neighbor_index == (target_pos[0]-1, target_pos[1]):
-                    #     segment_to_look_at_target = 'left'
-                    #     segment_to_look_at_candidate = 'right'
-                    # elif empty_tile_neighbor_index == (target_pos[0], target_pos[1]+1):
-                    #     segment_to_look_at_target = 'top'
-                    #     segment_to_look_at_candidate = 'bottom'
-                    # elif empty_tile_neighbor_index == (target_pos[0], target_pos[1]-1):
-                    #     segment_to_look_at_target = 'bottom'
-                    #     segment_to_look_at_candidate = 'top'
-                    # print(f'segment_to_look_at_target: {segment_to_look_at_target}')
-                    # print(f'segment_to_look_at_candidate: {segment_to_look_at_candidate}')
-                    
-                    found_canditate = False
-                    for i, candiate in enumerate(copy.deepcopy(tiles_not_placed)):
-                        for candiate_combo in candiate.all_tile_array_orientations:
-                            valid_candiate_combo = True
-                            # print(self.image.keys())
-                            placed_tiles_to_check_with_empty = get_neigbors_indexes(empty_tile_neighbor_index)
-                            placed_tiles_to_check_with_empty = [i for i in placed_tiles_to_check_with_empty if i in self.image]
-                            print(placed_tiles_to_check_with_empty)
-                            for placed_tile in placed_tiles_to_check_with_empty:
-                                segment_to_look_at_filled = ''
-                                segment_to_look_at_empty = ''
-                                if empty_tile_neighbor_index == (placed_tile[0]+1, placed_tile[1]):
-                                    segment_to_look_at_filled = 'right'
-                                    segment_to_look_at_empty = 'left'
-                                elif empty_tile_neighbor_index == (placed_tile[0]-1, placed_tile[1]):
-                                    segment_to_look_at_filled = 'left'
-                                    segment_to_look_at_empty = 'right'
-                                elif empty_tile_neighbor_index == (placed_tile[0], placed_tile[1]+1):
-                                    segment_to_look_at_filled = 'bottom'
-                                    segment_to_look_at_empty = 'top'
-                                elif empty_tile_neighbor_index == (placed_tile[0], placed_tile[1]-1):
-                                    segment_to_look_at_filled = 'top'
-                                    segment_to_look_at_empty = 'bottom'
-                                segment_for_checking_target = target_tile['edges'][segment_to_look_at_filled]
-                                segment_for_checking_candiate_combo = candiate_combo['edges'][segment_to_look_at_empty]
-                                valid_candiate_combo &= (segment_for_checking_target == segment_for_checking_candiate_combo).all()
-                            if valid_candiate_combo:
-                                good_tile = tiles_not_placed.pop(i)
-                                self.image[empty_tile_neighbor_index] = candiate_combo
-                                tiles_placed.append(good_tile)
-                                found_canditate = True
-                            if found_canditate:
-                                break
-                        if found_canditate:
-                                break
-                    if found_canditate:
-                                break
-                # input("...")
-                # print()
-                                
-                    
-def plot_image(image):
-    cordinate_data = {}
-    # cordinate_data['min_x'] = min([k[0] for k in image])
-    # cordinate_data['max_x'] = max([k[0] for k in image])
-    # cordinate_data['min_y'] = min([k[1] for k in image])
-    # cordinate_data['max_y'] = max([k[1] for k in image])
-    cordinate_data['min_x'] = -4
-    cordinate_data['max_x'] = 4
-    cordinate_data['min_y'] = -4
-    cordinate_data['max_y'] = 4
+        corner_ids = []
+        corner_ids.append(self.image_map[cordinate_data['top_left']].id)
+        corner_ids.append(self.image_map[cordinate_data['top_right']].id)
+        corner_ids.append(self.image_map[cordinate_data['bottom_left']].id)
+        corner_ids.append(self.image_map[cordinate_data['bottom_right']].id)
 
-    # cordinate_data['top_left'] = image[(cordinate_data['min_x'], cordinate_data['max_y'])]['id']
-    # cordinate_data['top_right'] = image[(cordinate_data['max_x'], cordinate_data['max_y'])]['id']
-    # cordinate_data['bottom_left'] = image[(cordinate_data['min_x'], cordinate_data['min_y'])]['id']
-    # cordinate_data['bottom_right'] = image[(cordinate_data['max_x'], cordinate_data['min_y'])]['id']
+        return corner_ids
 
-    x_blocks = cordinate_data['max_x'] - cordinate_data['min_x'] +1
-    y_blocks = cordinate_data['max_y'] - cordinate_data['min_y'] +1
-    # print()
-    # for k, v in image.items():
-    #     print(v['id'])
-    # print()
-    image_matrix = [[0 for i in range(x_blocks)] for j in range(y_blocks)]
-    for i in range(y_blocks):
-        for j in range(x_blocks):
-            x_y_cordinate = (j+cordinate_data['min_x'], i+cordinate_data['min_y'])
-            # print(x_y_cordinate in image)
-            if x_y_cordinate in image:
-                # print(f"x_y_cordinate: {x_y_cordinate}")
-                # print(f"x_y_cordinate: {image[x_y_cordinate]['id']}")
-                image_matrix[i][j] = image[x_y_cordinate]
-
-    # print(image_matrix)
-
-    # for i in range(y_blocks):
-    #     for j in range(x_blocks):
-    #         if image_matrix[i][j] != 0:
-    #             print(image_matrix[i][j]['id'])
-    
-
-    fig, axs = plt.subplots(y_blocks, x_blocks)
-    
-    # print(axs)
-
-    # print(image_matrix[0][0]['array'] == image_matrix[1][0]['array'] )
-
-    for i in range(y_blocks):
-        for j in range(x_blocks):
-            if image_matrix[i][j] != 0:
-                axs[i][j].matshow(image_matrix[i][j]['array'])
-            axs[i][j].set_xticklabels([])
-            axs[i][j].set_xticks([])
-            axs[i][j].set_yticklabels([])
-            axs[i][j].set_yticks([])
-            axs[i][j].get_xaxis().set_visible(False)
-            axs[i][j].get_yaxis().set_visible(False)
-
-    plt.subplots_adjust(wspace=0, hspace=0)
-    plt.show()
-                
-
+    def plot_tile_map(self) -> None:
+        cordinate_data = {}
+        cordinate_data['min_x'] = -4
+        cordinate_data['max_x'] = 4
+        cordinate_data['min_y'] = -4
+        cordinate_data['max_y'] = 4
         
+        x_blocks = cordinate_data['max_x'] - cordinate_data['min_x'] +1
+        y_blocks = cordinate_data['max_y'] - cordinate_data['min_y'] +1
+
+        image_matrix = [[0 for i in range(x_blocks)] for j in range(y_blocks)]
+        for i in range(y_blocks):
+            for j in range(x_blocks):
+                x_y_cordinate = (j+cordinate_data['min_x'], -1*(i+cordinate_data['min_y']))
+                if x_y_cordinate in self.image_map:
+                    image_matrix[i][j] = self.image_map[x_y_cordinate]
+        
+        fig, axs = plt.subplots(y_blocks, x_blocks)
+
+        for i in range(y_blocks):
+            for j in range(x_blocks):
+                if image_matrix[i][j] != 0:
+                    axs[i][j].matshow(image_matrix[i][j].array)
+                axs[i][j].set_xticklabels([])
+                axs[i][j].set_xticks([])
+                axs[i][j].set_yticklabels([])
+                axs[i][j].set_yticks([])
+                axs[i][j].get_xaxis().set_visible(False)
+                axs[i][j].get_yaxis().set_visible(False)
+
+        plt.subplots_adjust(wspace=0, hspace=0)
+        plt.show()
+
+    def place_tile(self, tile: Tile, position: Tuple[int,int]) -> None:
+        self.image_map[position] = tile
+        self.unplaced_tile_ids.remove(tile.id)
+        self.placed_tile_ids.add(tile.id)
+
+    @property
+    def all_tiles_placed(self) -> bool:
+        return not bool(self.unplaced_tile_ids)
+
+    def solve_map(self) -> None:
+        self.place_tile(self.tiles[0], (0,0))
+
+        while(not self.all_tiles_placed):
+            test_spots = []
+            for p in self.image_map:
+                test_spots += get_neigbors_indexes(p)
+            test_spots = [ts for ts in test_spots if ts not in self.image_map]
+            test_spots = list(set(test_spots))
+            
+            for test_spot in test_spots:                
+                placed_neighbor_spots = get_neigbors_indexes(test_spot)
+                placed_neighbor_spots= [s for s in placed_neighbor_spots if s in self.image_map]
+                placed_neighbors = [self.image_map[s] for s in placed_neighbor_spots]
+                neighbors_check_list = list(zip(placed_neighbor_spots, placed_neighbors))
+
+                candidates_for_test_spot: List[Tile] = []
+                for unplaced_tile_id in self.unplaced_tile_ids:
+                    candidate_tile = [t for t in self.tiles if t.id == unplaced_tile_id][0]
+                    candidates_for_test_spot += candidate_tile.variants
+
+                for candiate in candidates_for_test_spot:
+                    valid_candiate = []
+                    for placed_neighbor_spot, placed_neighbor in neighbors_check_list:
+                        edge_test_spot, edge_placed_neighbor_spot = get_check_edges(test_spot, placed_neighbor_spot)
+                        valid_candiate.append(candiate.edges[edge_test_spot] == placed_neighbor.edges[edge_placed_neighbor_spot])
+                    if all(valid_candiate) and valid_candiate:
+                        self.place_tile(candiate, test_spot)
+                        break
+        self.construct_image_array()
+    
+    def construct_image_array(self) -> None:
+        cordinate_data = {}
+        cordinate_data['min_x'] = min([c[0] for c in self.image_map])
+        cordinate_data['max_x'] = max([c[0] for c in self.image_map])
+        cordinate_data['min_y'] = min([c[1] for c in self.image_map])
+        cordinate_data['max_y'] = max([c[1] for c in self.image_map])
+        cordinate_data['top_left'] = (cordinate_data['min_x'], cordinate_data['max_y'])
+        cordinate_data['top_right'] = (cordinate_data['max_x'], cordinate_data['max_y'])
+        cordinate_data['bottom_left'] = (cordinate_data['min_x'], cordinate_data['min_y'])
+        cordinate_data['bottom_right'] = (cordinate_data['max_x'], cordinate_data['min_y'])
+        
+        x_blocks = cordinate_data['max_x'] - cordinate_data['min_x'] +1
+        y_blocks = cordinate_data['max_y'] - cordinate_data['min_y'] +1
+
+        tile_arrangement_matrix = [[0 for i in range(x_blocks)] for j in range(y_blocks)]
+        for i in range(y_blocks):
+            for j in range(x_blocks):
+                x_y_cordinate = (j+cordinate_data['min_x'], -1*(i-cordinate_data['max_y']))
+                if x_y_cordinate in self.image_map:
+                    tile_arrangement_matrix[i][j] = self.image_map[x_y_cordinate]
+        
+        # fig, axs = plt.subplots(y_blocks, x_blocks)
+        # for i in range(y_blocks):
+        #     for j in range(x_blocks):
+        #         axs[i][j].matshow(tile_arrangement_matrix[i][j].array)
+        #         axs[i][j].set_xticklabels([])
+        #         axs[i][j].set_xticks([])
+        #         axs[i][j].set_yticklabels([])
+        #         axs[i][j].set_yticks([])
+        #         axs[i][j].get_xaxis().set_visible(False)
+        #         axs[i][j].get_yaxis().set_visible(False)
+        # plt.subplots_adjust(wspace=0, hspace=0)
+        # plt.show()
+
+        array_arrangement_matrix = [[0 for i in range(x_blocks)] for j in range(y_blocks)]
+        for i in range(y_blocks):
+            for j in range(x_blocks):
+                array_arrangement_matrix[i][j] = np.array(tile_arrangement_matrix[i][j].array_borderless)
+        # array_arrangement_matrix = np.array(array_arrangement_matrix)
+
+        final_image_array = np.block(array_arrangement_matrix)
+        # final_image_array = np.vstack(array_arrangement_matrix[:])
+        # final_image_array = np.hstack(array_arrangement_matrix[:,])
+        self.image_array = final_image_array.tolist()
+    
+    def find_sea_monsters(self) -> int:
+        sea_monster = [list(map(int, list('00000000000000000010'))),
+                       list(map(int, list('10000110000110000111'))),
+                       list(map(int, list('01001001001001001000')))]
+        sea_monster_np = np.array(sea_monster)
+        image_array_np = np.array(self.image_array)
+
+        image_array_variants = []
+        image_array_variants.append(image_array_np)
+        image_array_variants.append(np.rot90(image_array_np, k=1))
+        image_array_variants.append(np.rot90(image_array_np, k=2))
+        image_array_variants.append(np.rot90(image_array_np, k=3))
+        image_array_variants.append(image_array_np.T)
+        image_array_variants.append(np.rot90(image_array_np.T, k=1))
+        image_array_variants.append(np.rot90(image_array_np.T, k=2))
+        image_array_variants.append(np.rot90(image_array_np.T, k=3))
+        for v in image_array_variants:
+            result = correlate2d(v, sea_monster_np, mode='valid')
+            if np.max(result) == 15:
+                return np.count_nonzero(result == 15)
+
+
 
 if __name__ == "__main__":
-    with open("input_small.txt") as f:
+    with open("input.txt") as f:
         image_data_raw = f.read()
     image_data_raw = re.split(r"\r?\n\r?\n", image_data_raw)
     image_data_raw = [list(i.splitlines()) for i in image_data_raw]
@@ -217,20 +264,17 @@ if __name__ == "__main__":
         tile_array[tile_array == '.'] = 0
         tile_array[tile_array == '#'] = 1
         tile_array = tile_array.astype(int)
+        tile_array = tile_array.tolist()
         image_data.append((tile_id, tile_array))
     
-    image_data = [Tile(id, a) for id, a in image_data]
+    tile_collection = [Tile(id, a) for id, a in image_data]
 
-    image = Image()
-    image.tiles = image_data
-    # print(image.tiles[0].all_tile_array_orientations[0])
-    print(len(image.tiles))
-
-    image.solve_image_from_tiles()
-    # for k,v in image.image.items():
-    #     print(f"{k} : {v['id']}")
-
-    plot_image(image.image)
-    print()
+    image = Image(tile_collection)
+    image.solve_map()
+    image_corner_product = functools.reduce(lambda x, y: x*y, image.image_map_corner_ids)
+    print(f"Part 1: {image_corner_product}")
     
+    number_of_sea_monsters = image.find_sea_monsters()
+    water_roughness = sum(row.count(1) for row in image.image_array) - 15*number_of_sea_monsters
+    print(f"Part 2: {water_roughness}")
 
